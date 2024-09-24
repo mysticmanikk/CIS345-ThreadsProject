@@ -8,9 +8,13 @@
 #define _STHREAD_SYNC_H_
 
 
-struct sthread_rwlock_struct {
-        /* FILL ME IN! */
-};
+typedef struct sthread_rwlock_struct {
+    volatile unsigned long writer;          // Flag to indicate if a writer is active
+    volatile unsigned long readers;         // Counter for active readers
+    volatile unsigned long waiting_writers; // Counter for waiting writers
+    sthread_queue_t read_queue;             // Queue for waiting readers
+    sthread_queue_t write_queue;            // Queue for waiting writers
+} sthread_rwlock_t;
 
 typedef struct sthread_rwlock_struct sthread_rwlock_t;
 
