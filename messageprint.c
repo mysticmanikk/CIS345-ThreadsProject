@@ -1,11 +1,12 @@
 
-#include<pthread.h>
 #include<stdio.h>
 #include<stdlib.h>
+#include<pthread.h>
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t CV = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t CV = PTHREAD_COND_INITIALIZER;
 int number_prime_finished = 0;
+int numberPrimes;
 
 void *threaded_function(void *arg);
 int prime(int number);
@@ -18,7 +19,6 @@ int main(int argc, char *argv[]){
     }
     //Quick and dirty way of doing this
     int threadNum = atoi(argv[1]);
-    int numberPrimes;
 
     //Prime Number finder
     for(int i = 0; i < threadNum;i++){
@@ -34,6 +34,10 @@ int main(int argc, char *argv[]){
     for(int i = 0; i < threadNum; i++){
         arrID[i] = i;
         pthread_create(&arrThread[i],NULL,threaded_function,&arrID[i]);
+    }
+
+
+    for(int i = 0; i < threadNum; i++){
         pthread_join(arrThread[i], NULL);
     }
 
@@ -41,8 +45,24 @@ int main(int argc, char *argv[]){
 
 void *threaded_function(void *arg){
     int threadID = *(int *)arg;
-    printf("This is a thread\n");
-    
+
+    pthread_mutex_lock(&lock);
+    if((prime(threadID)) == 0){
+        printf("This is a prime thread\n");
+        number_prime_finished++;
+        if(number_prime_finished == numberPrimes){
+            pthread_cond_broadcast(&CV);
+        }
+        pthread_mutex_unlock(&lock);
+    }
+    else{
+        while(number_prime_finished < numberPrimes){
+            pthread_cond_wait(&CV, &lock);
+        }
+        printf("This is a composite thread\n");
+        pthread_mutex_unlock(&lock);
+    }
+
     return 0;
 }
 
@@ -57,7 +77,4 @@ int prime(int number){
     }
     return 0;
 }
-
-
-
 
