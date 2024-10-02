@@ -47,110 +47,191 @@ static inline void clear_bit(volatile unsigned long *addr)
  * rwlock routines
  */
 
+// Initialize the read-write lock
 int sthread_rwlock_init(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
-    rwlock->writer = 0;
-    rwlock->readers = 0;
-    rwlock->waiting_writers = 0;
-    sthread_queue_init(&rwlock->read_queue);
-    sthread_queue_init(&rwlock->write_queue);
+{
+    if (!rwlock) return -1;
+
+    rwlock->active_readers = 0;
+    rwlock->active_writers = 0;
+    rwlock->waiting_writers_count = 0;
+    rwlock->waiting_readers = NULL;
+    rwlock->waiting_writers = NULL;
+    rwlock->lock = 0;
+
     return 0;
 }
 
-
+// Destroy the read-write lock
 int sthread_rwlock_destroy(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
-    if (rwlock->writer || rwlock->readers > 0) {
-        // Cannot destroy a lock that is still in use
-        return -1;
+{
+    if (!rwlock) return -1;
+
+    // Clean up the queues
+    while (rwlock->waiting_readers) {
+        sthread_queue_t *temp = rwlock->waiting_readers;
+        rwlock->waiting_readers = rwlock->waiting_readers->next;
+        free(temp);
     }
-    sthread_queue_destroy(&rwlock->read_queue);
-    sthread_queue_destroy(&rwlock->write_queue);
+
+    while (rwlock->waiting_writers) {
+        sthread_queue_t *temp = rwlock->waiting_writers;
+        rwlock->waiting_writers = rwlock->waiting_writers->next;
+        free(temp);
+    }
+
     return 0;
 }
 
-
+// Acquire the read lock
 int sthread_read_lock(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
+{
+    if (!rwlock) return -1;
+
     while (1) {
-        if (rwlock->writer || rwlock->waiting_writers) {
-            // Writer is active or writers are waiting, suspend reader
-            sthread_queue_add(&rwlock->read_queue, sthread_self());
-            sthread_suspend();
-        } else {
-            // Increment the readers counter and return
-            __sync_fetch_and_add(&rwlock->readers, 1);
-            break;
+        // Lock acquired
+        if (test_and_set_bit(&rwlock->lock) == 0) {
+            // Ensure no writers are active or waiting
+            if (rwlock->active_writers == 0 && rwlock->waiting_writers_count == 0) {
+                rwlock->active_readers++;
+                clear_bit(&rwlock->lock);
+                return 0;
+            }
+            clear_bit(&rwlock->lock);  // Release the lock
         }
+
+        // Queue the reader and suspend
+        sthread_queue_t *new_reader = malloc(sizeof(sthread_queue_t));
+        new_reader->thread = sthread_self();
+        new_reader->next = NULL;
+
+        if (!rwlock->waiting_readers) {
+            rwlock->waiting_readers = new_reader;
+        } else {
+            sthread_queue_t *temp = rwlock->waiting_readers;
+            while (temp->next) temp = temp->next;
+            temp->next = new_reader;
+        }
+
+        sthread_suspend(); // Suspend the thread
     }
-    return 0;
 }
 
-
+// Try to acquire the read lock (non-blocking)
 int sthread_read_try_lock(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
-    if (rwlock->writer || rwlock->waiting_writers) {
-        // If a writer is active or waiting, fail to acquire the lock
-        return -1;
-    }
-    __sync_fetch_and_add(&rwlock->readers, 1);
-    return 0;
-}
+{
+    if (!rwlock) return -1;
 
-int sthread_read_unlock(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
-    __sync_fetch_and_sub(&rwlock->readers, 1);
-    if (rwlock->readers == 0 && !sthread_queue_empty(&rwlock->write_queue)) {
-        // No readers left, wake a writer
-        sthread_wake(sthread_queue_remove(&rwlock->write_queue));
-    }
-    return 0;
-}
-
-
-int sthread_write_lock(sthread_rwlock_t *rwlock)
-{	/*FILL ME IN */
-    __sync_fetch_and_add(&rwlock->waiting_writers, 1);
-    while (1) {
-        if (rwlock->readers == 0 && !rwlock->writer) {
-            // No active readers or writers, acquire the write lock
-            rwlock->writer = 1;
-            __sync_fetch_and_sub(&rwlock->waiting_writers, 1);
-            break;
-        } else {
-            // Suspend writer if conditions are not met
-            sthread_queue_add(&rwlock->write_queue, sthread_self());
-            sthread_suspend();
+    // Try to acquire the lock without blocking
+    if (test_and_set_bit(&rwlock->lock) == 0) {
+        if (rwlock->active_writers == 0 && rwlock->waiting_writers_count == 0) {
+            rwlock->active_readers++;
+            clear_bit(&rwlock->lock);
+            return 0;
         }
+        clear_bit(&rwlock->lock);  // Release the lock
     }
+
+    return EBUSY;  // Return immediately if the lock can't be acquired
+}
+
+// Release the read lock
+int sthread_read_unlock(sthread_rwlock_t *rwlock)
+{
+    if (!rwlock) return -1;
+
+    test_and_set_bit(&rwlock->lock); // Acquire the lock
+    rwlock->active_readers--;
+
+    // If no more active readers, wake a waiting writer if any
+    if (rwlock->active_readers == 0 && rwlock->waiting_writers) {
+        sthread_queue_t *writer = rwlock->waiting_writers;
+        rwlock->waiting_writers = rwlock->waiting_writers->next;
+        rwlock->waiting_writers_count--;
+        sthread_wake(writer->thread);
+        free(writer);
+    }
+
+    clear_bit(&rwlock->lock); // Release the lock
     return 0;
 }
 
+// Acquire the write lock
+int sthread_write_lock(sthread_rwlock_t *rwlock)
+{
+    if (!rwlock) return -1;
+
+    while (1) {
+        if (test_and_set_bit(&rwlock->lock) == 0) {
+            if (rwlock->active_readers == 0 && rwlock->active_writers == 0) {
+                rwlock->active_writers++;
+                clear_bit(&rwlock->lock);
+                return 0;
+            }
+            clear_bit(&rwlock->lock);
+        }
+
+        // Queue the writer and suspend
+        sthread_queue_t *new_writer = malloc(sizeof(sthread_queue_t));
+        new_writer->thread = sthread_self();
+        new_writer->next = NULL;
+
+        if (!rwlock->waiting_writers) {
+            rwlock->waiting_writers = new_writer;
+        } else {
+            sthread_queue_t *temp = rwlock->waiting_writers;
+            while (temp->next) temp = temp->next;
+            temp->next = new_writer;
+        }
+        rwlock->waiting_writers_count++;
+
+        sthread_suspend(); // Suspend the thread
+    }
+}
+
+// Try to acquire the write lock (non-blocking)
 int sthread_write_try_lock(sthread_rwlock_t *rwlock)
 {
-	/*FILL ME IN */
-    if (rwlock->readers == 0 && !rwlock->writer) {
-        rwlock->writer = 1;
-        return 0;
+    if (!rwlock) return -1;
+
+    // Try to acquire the lock without blocking
+    if (test_and_set_bit(&rwlock->lock) == 0) {
+        if (rwlock->active_readers == 0 && rwlock->active_writers == 0) {
+            rwlock->active_writers++;
+            clear_bit(&rwlock->lock);
+            return 0;
+        }
+        clear_bit(&rwlock->lock);  // Release the lock
     }
-    return -1; // Lock could not be acquired
+
+    return EBUSY;  // Return immediately if the lock can't be acquired
 }
 
-
+// Release the write lock
 int sthread_write_unlock(sthread_rwlock_t *rwlock)
 {
-        /* FILL ME IN! */
-    rwlock->writer = 0;
-    if (!sthread_queue_empty(&rwlock->write_queue)) {
-        // Wake up the next writer if any are waiting
-        sthread_wake(sthread_queue_remove(&rwlock->write_queue));
-    } else {
-        // Otherwise, wake up all waiting readers
-        while (!sthread_queue_empty(&rwlock->read_queue)) {
-            sthread_wake(sthread_queue_remove(&rwlock->read_queue));
+    if (!rwlock) return -1;
+
+    test_and_set_bit(&rwlock->lock); // Acquire the lock
+    rwlock->active_writers--;
+
+    // If there are writers waiting, prioritize them
+    if (rwlock->waiting_writers) {
+        sthread_queue_t *writer = rwlock->waiting_writers;
+        rwlock->waiting_writers = rwlock->waiting_writers->next;
+        rwlock->waiting_writers_count--;
+        sthread_wake(writer->thread);
+        free(writer);
+    } else if (rwlock->waiting_readers) {
+        // If no writers are waiting, wake all waiting readers
+        while (rwlock->waiting_readers) {
+            sthread_queue_t *reader = rwlock->waiting_readers;
+            rwlock->waiting_readers = rwlock->waiting_readers->next;
+            sthread_wake(reader->thread);
+            free(reader);
         }
     }
+
+    clear_bit(&rwlock->lock); // Release the lock
     return 0;
 }
-
-
