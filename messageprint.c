@@ -9,7 +9,7 @@ int number_prime_finished = 0;
 int numberPrimes;
 
 void *threaded_function(void *arg);
-int prime(int number);
+int prime(unsigned long number);
 
 
 int main(int argc, char *argv[]){
@@ -45,10 +45,11 @@ int main(int argc, char *argv[]){
 
 void *threaded_function(void *arg){
     int threadID = *(int *)arg;
+    pthread_t thread_id = pthread_self();
 
     pthread_mutex_lock(&lock);
     if((prime(threadID)) == 0){
-        printf("This is a prime thread\n");
+        printf("This is a prime thread, ID: %d\n", threadID);
         number_prime_finished++;
         if(number_prime_finished == numberPrimes){
             pthread_cond_broadcast(&CV);
@@ -59,18 +60,18 @@ void *threaded_function(void *arg){
         while(number_prime_finished < numberPrimes){
             pthread_cond_wait(&CV, &lock);
         }
-        printf("This is a composite thread\n");
+        printf("This is a composite thread, ID: %d\n", threadID);
         pthread_mutex_unlock(&lock);
     }
 
     return 0;
 }
 
-int prime(int number){
+int prime(unsigned long number){
     if((number == 0) | (number == 1)){
         return 1;
     }
-    for(int i = 2; i < number; i++){
+    for(unsigned long i = 2; i < number; i++){
         if(number % i == 0){
             return 1;
         }
